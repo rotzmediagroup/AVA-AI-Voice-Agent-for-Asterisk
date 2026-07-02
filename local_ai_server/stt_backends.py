@@ -984,7 +984,10 @@ class FasterWhisperSTTBackend:
         self.model_size = model_size
         self.device = device
         self.compute_type = compute_type
-        self.language = language
+        # "auto"/empty → None so faster-whisper auto-detects the spoken language
+        # (LVAP fork patch: Dutch/English callers on the same DID)
+        _lang = (language or "").strip().lower()
+        self.language = None if _lang in ("", "auto", "none") else language
         self.sample_rate = sample_rate
         self.model = None
         self._initialized = False
