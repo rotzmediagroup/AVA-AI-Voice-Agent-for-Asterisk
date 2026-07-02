@@ -296,6 +296,14 @@ class OllamaLLMAdapter(LLMComponent):
             except Exception:
                 logger.debug("Invalid num_ctx for Ollama (ignoring)", call_id=call_id, num_ctx=num_ctx)
 
+        # Thinking-model control (Qwen3.x, DeepSeek-R1, ...): without think=false these
+        # models spend the entire num_predict budget on reasoning tokens and return
+        # empty content — the voice agent stays silent. Set `think: false` in the
+        # pipeline llm options for telephony use.
+        think = merged.get("think")
+        if think is not None:
+            payload["think"] = bool(think)
+
         # Add tools if model supports them.
         # Tool availability is resolved per-context by the engine (contexts are the source of truth).
         tool_names = merged.get("tools", [])
