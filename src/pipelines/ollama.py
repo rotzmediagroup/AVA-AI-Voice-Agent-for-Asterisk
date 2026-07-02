@@ -67,6 +67,9 @@ class OllamaLLMAdapter(LLMComponent):
     """
 
     component_key = "ollama_llm"
+    # LVAP fork: real token streaming via generate_stream() — the engine overlaps
+    # sentence-boundary TTS with generation, cutting first-audio latency.
+    supports_streaming = True
 
     def __init__(
         self,
@@ -78,6 +81,9 @@ class OllamaLLMAdapter(LLMComponent):
         self._session: Optional[aiohttp.ClientSession] = None
         self._sessions: Dict[str, Dict[str, Any]] = {}  # per-call state
         self._tools_supported: Dict[str, bool] = {}  # model -> supports tools
+        # Engine contract: tool calls detected during generate_stream() are
+        # parked here and picked up after the stream ends (see engine.py).
+        self._pending_tool_calls_by_call: Dict[str, List[Dict[str, Any]]] = {}
 
     def _compose_options(self, runtime_opts: Dict[str, Any]) -> Dict[str, Any]:
         """Merge pipeline defaults with runtime options."""
@@ -419,6 +425,121 @@ class OllamaLLMAdapter(LLMComponent):
         except Exception as e:
             logger.error("Ollama request failed", call_id=call_id, error=str(e))
             return LLMResponse(text="I encountered an error. Please try again.")
+
+    async def generate_stream(
+        self,
+        call_id: str,
+        transcript: str,
+        context: Dict[str, Any],
+        options: Dict[str, Any],
+    ):
+        """LVAP fork: token streaming from Ollama /api/chat (stream:true).
+
+        Yields content deltas; tool calls found in the stream are parked in
+        _pending_tool_calls_by_call for the engine to execute afterwards.
+        Any failure raises — the engine catches it and falls back to the
+        serial generate() path.
+        """
+        if call_id not in self._sessions:
+            await self.open_call(call_id, options)
+        session_state = self._sessions[call_id]
+        merged = self._compose_options(options)
+        messages = session_state["messages"]
+        model = merged["model"]
+
+        # Same message assembly as generate(): system prompt (from options, see
+        # generate() fix), prior tool results, then the user transcript.
+        if not messages or messages[0].get("role") != "system":
+            system_prompt = context.get("system_prompt", "") or merged.get("system_prompt", "")
+            if system_prompt:
+                messages.insert(0, {"role": "system", "content": system_prompt})
+        for pm in context.get("prior_messages", []) or []:
+            role, content = pm.get("role"), pm.get("content")
+            if role == "system" or (role == "assistant" and pm.get("tool_calls")):
+                continue
+            if role == "tool":
+                messages.append({"role": "assistant", "content": "I have the information from the tool."})
+                messages.append({
+                    "role": "user",
+                    "content": f"[SYSTEM] The tool returned: {content or 'Tool executed successfully.'}\n\n"
+                               "Now say this information to the caller in a natural way. Do not add extra commentary.",
+                })
+            elif content and role in ("user", "assistant"):
+                if not any(m.get("content") == content and m.get("role") == role for m in messages):
+                    messages.append({"role": role, "content": content})
+        if transcript and transcript.strip():
+            messages.append({"role": "user", "content": transcript})
+
+        await self._ensure_session()
+        assert self._session
+        url = f"{merged['base_url'].rstrip('/')}/api/chat"
+        payload: Dict[str, Any] = {
+            "model": model,
+            "messages": messages[-10:],
+            "stream": True,
+            "options": {
+                "temperature": merged.get("temperature", 0.7),
+                "num_predict": merged.get("max_tokens", 200),
+            },
+        }
+        num_ctx = merged.get("num_ctx") or merged.get("context_window") or merged.get("context_length")
+        if num_ctx is not None:
+            payload["options"]["num_ctx"] = int(num_ctx)
+        think = merged.get("think")
+        if think is not None:
+            payload["think"] = bool(think)
+        tool_names = merged.get("tools", [])
+        if tool_names and bool(merged.get("tools_enabled", True)) and self._model_supports_tools(model) \
+                and not session_state.get("tools_failed", False):
+            tools_schema = self._build_tools_schema(tool_names)
+            if tools_schema:
+                payload["tools"] = tools_schema
+
+        collected = ""
+        parsed_tool_calls: List[Dict[str, Any]] = []
+        timeout = aiohttp.ClientTimeout(total=merged["timeout_sec"])
+        async with self._session.post(url, json=payload, timeout=timeout) as response:
+            if response.status >= 400:
+                body = await response.text()
+                raise RuntimeError(f"Ollama stream error {response.status}: {body[:200]}")
+            async for raw in response.content:
+                line = raw.strip()
+                if not line:
+                    continue
+                data = json.loads(line)
+                msg = data.get("message", {}) or {}
+                for tc in msg.get("tool_calls") or []:
+                    func = tc.get("function", {})
+                    parsed_tool_calls.append({
+                        "id": tc.get("id", f"call_{len(parsed_tool_calls)}"),
+                        "name": func.get("name"),
+                        "parameters": func.get("arguments", {}),
+                        "type": "function",
+                    })
+                token = msg.get("content") or ""
+                if token:
+                    collected += token
+                    if len(collected) <= 500:  # same voice-length cap as generate()
+                        yield token
+                if data.get("done"):
+                    break
+
+        messages.append({"role": "assistant", "content": collected})
+        if parsed_tool_calls:
+            self._pending_tool_calls_by_call[call_id] = parsed_tool_calls
+            logger.info(
+                "Ollama tool calls detected (stream)",
+                call_id=call_id,
+                tools=[tc["name"] for tc in parsed_tool_calls],
+            )
+        logger.info(
+            "Ollama response (stream)",
+            call_id=call_id,
+            model=model,
+            response_length=len(collected),
+            tool_calls=len(parsed_tool_calls),
+            preview=collected[:80] if collected else "(tool call only)",
+        )
 
     async def validate_connectivity(self, options: Dict[str, Any]) -> Dict[str, Any]:
         """Test connectivity to the Ollama instance and list available models."""

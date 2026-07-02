@@ -1023,11 +1023,15 @@ class FasterWhisperSTTBackend:
             cache_dir = os.path.join("/app", "models", "stt", "faster_whisper_cache")
             os.makedirs(cache_dir, exist_ok=True)
 
+            # LVAP fork: cap CT2 threads — unbounded whisper starved Kokoro TTS on
+            # the same CPU (measured -17..-30% realtime drift → audible stutter).
+            _cpu_threads = int(os.getenv("FASTER_WHISPER_CPU_THREADS", "6"))
             self.model = WhisperModel(
                 self.model_size,
                 device=device,
                 compute_type=self.compute_type,
                 download_root=cache_dir,
+                cpu_threads=_cpu_threads,
             )
             
             self._initialized = True

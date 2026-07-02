@@ -1,0 +1,43 @@
+# LVAP: local_ai_server on the NVIDIA NGC PyTorch base for DGX Spark GB10.
+# Why: stock aarch64 pip torch runs Kokoro at ~0.7x realtime on CPU (audible
+# stutter); the NGC image has GB10-optimized torch + CUDA, and kokoro's
+# KPipeline auto-selects cuda. House rule: GPU Python containers build FROM
+# nvcr.io/nvidia/pytorch (see openVapi/docs/environment-inventory.md).
+#
+# Backends included: faster-whisper (STT, CPU — CT2 has no CUDA on aarch64)
+# and Kokoro (TTS, GPU). vosk/piper/llama/sherpa are intentionally omitted;
+# optional_imports degrades them gracefully.
+FROM nvcr.io/nvidia/pytorch:25.11-py3
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+RUN apt-get -o Acquire::Retries=5 update && \
+    apt-get install -y --no-install-recommends \
+        espeak-ng sox libsndfile1 tzdata && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# torch comes from the base image — do NOT reinstall it.
+RUN pip install --no-cache-dir \
+        "websockets==15.0.1" \
+        "faster-whisper==1.0.3" \
+        "kokoro>=0.9.2" \
+        "soundfile" && \
+    python -c "import nltk; nltk.download('averaged_perceptron_tagger_eng')" || true
+
+# misaki (kokoro G2P) needs spaCy's English model; the NGC image's spaCy
+# cannot auto-download it at runtime.
+RUN python -m spacy download en_core_web_sm || pip install --no-cache-dir \
+    https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
+
+COPY . .
+
+# Non-root like the stock image; uid 1000 matches the host bind-mount owner
+RUN (userdel -r $(getent passwd 1000 | cut -d: -f1) 2>/dev/null || true) && \
+    useradd -m -u 1000 appuser && chown -R appuser /app
+USER appuser
+
+CMD ["python3", "main.py"]
