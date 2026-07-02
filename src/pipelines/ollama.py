@@ -48,8 +48,8 @@ _TOOL_CAPABLE_MODELS = {
     "llama3.2", "llama3.1", "llama3", "llama3.2:1b", "llama3.2:3b",
     "mistral", "mistral-nemo", "mistral:7b",
     "qwen2.5", "qwen2.5:7b", "qwen2.5:14b", "qwen2",
-    # LVAP fork: qwen3 family emits native Ollama tool_calls (verified on qwen3.5:35b)
-    "qwen3.5", "qwen3", "qwen3-vl",
+    # LVAP fork: verified native Ollama tool_calls (with think:false where applicable)
+    "qwen3.5", "qwen3", "qwen3-vl", "gemma4",
     "command-r", "command-r-plus",
     "nemotron", "granite3-dense",
 }
@@ -123,7 +123,7 @@ class OllamaLLMAdapter(LLMComponent):
     _KNOWN_KEYS = frozenset({
         # consumed by the adapter
         "base_url", "model", "temperature", "timeout_sec", "stream",
-        "max_tokens", "tools_enabled", "tools",
+        "max_tokens", "tools_enabled", "tools", "think",
         "num_ctx", "context_window", "context_length",
         # provider-level meta keys from providers.ollama_llm
         "enabled", "type", "display_name", "customer", "capabilities",
