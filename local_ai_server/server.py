@@ -3026,6 +3026,11 @@ class LocalAIServer:
 
         Optionally caches short phrases to avoid re-synthesis.
         """
+        # LVAP fork: sanitize BEFORE synthesis so no backend ever speaks
+        # emoji names, "asterisk", markdown, or leaked markup.
+        text = self._sanitize_spoken_text(text)
+        if not text:
+            return b""
         # TTS phrase cache: return cached audio for repeated short phrases
         if self.config.tts_phrase_cache_enabled and len(text) <= self.config.tts_phrase_cache_max_text_len:
             cache_key = self._tts_cache_key(text)
@@ -4099,6 +4104,35 @@ class LocalAIServer:
         if request_id:
             payload["request_id"] = request_id
         return await self._send_json(websocket, payload)
+
+    _EMOJI_RE = None  # compiled lazily (class-level cache)
+
+    @classmethod
+    def _sanitize_spoken_text(cls, text: str) -> str:
+        """LVAP fork: strip emoji/markdown/symbols the phonemizer would read aloud
+        ("asterisk", emoji names, ...). Keeps sentence punctuation for prosody.
+        Single choke point for ALL TTS backends."""
+        import re
+        if not text:
+            return ""
+        if cls._EMOJI_RE is None:
+            cls._EMOJI_RE = re.compile(
+                "["
+                "\U0001F000-\U0001FAFF"   # emoji blocks
+                "\U00002600-\U000027BF"   # misc symbols/dingbats
+                "\U0001F1E6-\U0001F1FF"   # flags
+                "⬀-⯿←-⇿"  # arrows
+                "️‍"            # variation selector / ZWJ
+                "]+"
+            )
+        text = re.sub(r"```.*?```", " ", text, flags=re.S)      # code blocks
+        text = re.sub(r"`([^`]*)`", r"\1", text)                 # inline code
+        text = cls._EMOJI_RE.sub(" ", text)
+        text = re.sub(r"\*{1,3}([^*]*)\*{1,3}", r"\1", text)     # *em*/**bold** keep inner text
+        text = re.sub(r"^\s*[-•#>*]+\s*", "", text, flags=re.M)  # bullets/headers/quotes
+        text = re.sub(r"[_~^|<>\[\]{}\\]", " ", text)            # stray markup symbols
+        text = re.sub(r"\s{2,}", " ", text)
+        return text.strip()
 
     def _strip_tool_calls_for_tts(self, text: str) -> str:
         """

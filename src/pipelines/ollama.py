@@ -229,9 +229,12 @@ class OllamaLLMAdapter(LLMComponent):
         model = merged["model"]
         
         # Build messages array
-        # Add system message if not already present
+        # Add system message if not already present.
+        # LVAP fork fix: the engine delivers the context-resolved system prompt in
+        # llm_options (4th arg → merged), NOT in the context dict — reading only
+        # context["system_prompt"] silently dropped the persona on every call.
         if not messages or messages[0].get("role") != "system":
-            system_prompt = context.get("system_prompt", "")
+            system_prompt = context.get("system_prompt", "") or merged.get("system_prompt", "")
             if system_prompt:
                 messages.insert(0, {"role": "system", "content": system_prompt})
         
